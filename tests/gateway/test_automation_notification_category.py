@@ -249,3 +249,46 @@ async def test_refused_watch_wake_logs_the_refusal_code(tmp_path, monkeypatch, c
             'Watch notification not admitted for discord chat=42: admission_conflict']
     finally:
         authority.db.close()
+
+
+@pytest.mark.asyncio
+async def test_native_automation_durable_snapshot_does_not_block_event_loop(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+    from gateway import session_automation
+
+    _runner, authority, adapter, source, metadata = await _native_owner(tmp_path, monkeypatch, "human")
+    original = session_automation.committed_route_envelope
+    entered = threading.Event()
+    ticked = threading.Event()
+    release = threading.Event()
+    resumed_before_release = []
+
+    def slow_ledger_read(*args):
+        entered.set()
+        assert release.wait(3)
+        return original(*args)
+
+    def release_after_loop_tick():
+        if entered.wait(2):
+            resumed_before_release.append(ticked.wait(1))
+            release.set()
+
+    monkeypatch.setattr(session_automation, "committed_route_envelope", slow_ledger_read)
+    threading.Thread(target=release_after_loop_tick, daemon=True).start()
+
+    async def loop_tick():
+        await asyncio.to_thread(entered.wait, 2)
+        ticked.set()
+
+    pulse = asyncio.create_task(loop_tick())
+    event = MessageEvent(text="notice", source=source, internal=True,
+        metadata={"gateway_session_key": metadata["gateway_session_key"],
+                  "gateway_session_id": metadata["gateway_session_id"]})
+    try:
+        await authority.admit_automation(adapter, event, "notice")
+        await pulse
+        assert resumed_before_release == [True]
+    finally:
+        release.set()
+        authority.db.close()

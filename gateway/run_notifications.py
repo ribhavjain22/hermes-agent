@@ -1112,7 +1112,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 try:
                     from tools.async_delegation import claim_completion_delivery
                     claim.claim_id = f"gateway:{id(self)}:{__import__('uuid').uuid4().hex}"
-                    if not claim_completion_delivery(claim.delegation_id, claim.claim_id):
+                    if not await asyncio.to_thread(claim_completion_delivery, claim.delegation_id, claim.claim_id):
                         claim.proceed = False
                         return claim
                 except Exception as exc:
@@ -1140,7 +1140,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                     claim.delegation_id or "<legacy>", parent_session_id,
                 )
                 if claim.claim_id:
-                    self._settle_durable_claim("drop", claim.delegation_id, claim.claim_id)
+                    await asyncio.to_thread(self._settle_durable_claim, "drop", claim.delegation_id, claim.claim_id)
             else:
                 logger.warning(
                     "Background process %s completion targets "
@@ -1255,10 +1255,10 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                     self._completion_deliveries_inflight.discard(identity)
             operation = "complete" if accepted else "defer" if refused or claim.defer else "release"
             if claim.claim_id:
-                self._settle_durable_claim(operation, claim.delegation_id, claim.claim_id)
+                await asyncio.to_thread(self._settle_durable_claim, operation, claim.delegation_id, claim.claim_id)
             for sibling, claim_id in sibling_claims:
                 if claim_id:
-                    self._settle_durable_claim(operation, sibling["delegation_id"], claim_id)
+                    await asyncio.to_thread(self._settle_durable_claim, operation, sibling["delegation_id"], claim_id)
             if accepted and sibling_claims:
                 self._record_coalesced_completion_siblings([event for event, _claim_id in sibling_claims])
 

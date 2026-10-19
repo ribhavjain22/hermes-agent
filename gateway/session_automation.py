@@ -465,7 +465,14 @@ async def admit_automation(authority, adapter, event, identity, replaces=None):
     tick carrying the output of the one still waiting). Its cancellation commits in this admission's
     own transaction, so neither lands without the other."""
     authority._require_admission_open()
-    payload, entry = snapshot_automation(authority, adapter, event, identity)
+    if event.source.platform == Platform.LOCAL:
+        payload, entry = snapshot_automation(authority, adapter, event, identity)
+    else:
+        # Snapshot validation reads SQLite/durable-ledger state; keep it off the Discord shard loop.
+        import asyncio
+        payload, entry = await asyncio.to_thread(
+            snapshot_automation, authority, adapter, event, identity,
+        )
     from gateway.session_authority import LiveSession
     sid = (payload.get('local_automation_v1') or payload['native_text_v1']['automation'])['owner']
     ref = SessionRef(authority.profile_id, sid)

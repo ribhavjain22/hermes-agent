@@ -923,3 +923,95 @@ async def test_post_turn_watch_drain_defers_busy_route_with_backoff(monkeypatch,
 
     assert attempts == 1
     assert completion_queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_durable_claim_settlement_does_not_block_event_loop(monkeypatch, tmp_path):
+    import threading
+    from types import SimpleNamespace
+
+    from tools import async_delegation
+    import tools.process_registry_notifications as registry_notifications
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    claim = SimpleNamespace(
+        proceed=True, early_result=None, defer=False, claim_id="claim-1",
+        delegation_id="deleg-1", owner_session_id="", proven_session_id="",
+    )
+
+    async def ready_claim(_evt):
+        return claim
+
+    async def inject(_text, _evt, **_kwargs):
+        return True
+
+    monkeypatch.setattr(runner, "_preflight_completion_delivery", ready_claim)
+    monkeypatch.setattr(runner, "_inject_watch_notification", inject)
+    monkeypatch.setattr(runner, "_completion_identity_seen", lambda *_a, **_kw: False)
+    monkeypatch.setattr(runner, "_mark_completions_delivered_locked", lambda *_a: None)
+    runner._completion_delivery_lock = threading.Lock()
+    monkeypatch.setattr(registry_notifications, "should_surface_notification", lambda _evt: True)
+
+    released = threading.Event()
+    settled = threading.Event()
+
+    def blocked_settlement(*_args):
+        released.wait(timeout=1)
+        settled.set()
+        return True
+
+    monkeypatch.setattr(async_delegation, "complete_completion_delivery", blocked_settlement)
+    timer = threading.Timer(0.2, released.set)
+    timer.start()
+    event = {"type": "async_delegation", "delegation_id": "deleg-1"}
+
+    async def loop_tick():
+        await asyncio.sleep(0)
+        assert not settled.is_set(), "durable claim settlement blocked the asyncio loop"
+
+    try:
+        delivery = asyncio.create_task(runner._deliver_completion_notification_scoped("done", event))
+        tick = asyncio.create_task(loop_tick())
+        await asyncio.gather(tick, delivery)
+    finally:
+        timer.cancel()
+        released.set()
+
+
+@pytest.mark.asyncio
+async def test_durable_claim_acquisition_does_not_block_event_loop(monkeypatch, tmp_path):
+    import threading
+
+    from tools import async_delegation
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+
+    async def ready(_evt):
+        return True
+
+    monkeypatch.setattr(runner, "_completion_delivery_ready", ready)
+    released = threading.Event()
+    settled = threading.Event()
+
+    def blocked_claim(*_args):
+        released.wait(timeout=1)
+        settled.set()
+        return True
+
+    monkeypatch.setattr(async_delegation, "claim_completion_delivery", blocked_claim)
+    timer = threading.Timer(0.2, released.set)
+    timer.start()
+    event = {"type": "async_delegation", "delegation_id": "deleg-2"}
+
+    async def loop_tick():
+        await asyncio.sleep(0)
+        assert not settled.is_set(), "durable claim acquisition blocked the asyncio loop"
+
+    try:
+        acquisition = asyncio.create_task(runner._preflight_completion_delivery(event))
+        tick = asyncio.create_task(loop_tick())
+        claim = await asyncio.gather(acquisition, tick)
+        assert claim[0].proceed and claim[0].claim_id
+    finally:
+        timer.cancel()
+        released.set()
