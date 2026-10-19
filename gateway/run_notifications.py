@@ -710,8 +710,21 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         """
         from gateway.run import _drain_gateway_watch_events, _format_gateway_process_notification
         watch_events = _drain_gateway_watch_events(completion_queue)
+        retry_states = getattr(self, "_watch_notification_retry_state", None)
+        if retry_states is None:
+            retry_states = self._watch_notification_retry_state = {}
         for evt in watch_events:
-            if evt.get("_watch_notification_retry_after", 0) > time.monotonic():
+            now = time.monotonic()
+            route_key = (
+                str(evt.get("profile") or ""), str(evt.get("platform") or ""),
+                str(evt.get("chat_id") or ""), str(evt.get("thread_id") or ""),
+                str(evt.get("session_key") or evt.get("origin_session_id") or evt.get("session_id") or ""),
+            )
+            route_state = retry_states.get(route_key)
+            if evt.get("_watch_notification_retry_after", 0) > now:
+                completion_queue.put(evt)
+                continue
+            if route_state and route_state["retry_after"] > now:
                 completion_queue.put(evt)
                 continue
             async with self._completion_event_scope(evt):
@@ -750,22 +763,32 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                         evt["_watch_notification_retry_reason"] = str(exc)
                         logger.debug("Watch notification injection error; deferring: %s", exc)
                         delivered = False
-            # Retry refusals without polling the busy session on every drain tick.
+            # Retry refusals without polling or re-logging every producer tick for a busy route.
             if delivered is False:
-                attempt = int(evt.get("_watch_notification_attempts", 0)) + 1
+                attempt = max(
+                    int(evt.get("_watch_notification_attempts", 0)),
+                    int(route_state["attempts"]) if route_state else 0,
+                ) + 1
                 delay = jittered_backoff(
                     attempt, base_delay=5, max_delay=_WATCH_NOTIFICATION_RETRY_MAX_DELAY,
                     jitter_ratio=0.0,
                 )
+                retry_after = time.monotonic() + delay
                 evt["_watch_notification_attempts"] = attempt
-                evt["_watch_notification_retry_after"] = time.monotonic() + delay
+                evt["_watch_notification_retry_after"] = retry_after
+                retry_states[route_key] = {
+                    "attempts": attempt, "retry_after": retry_after,
+                    "reason": evt.get("_watch_notification_retry_reason", "transient refusal"),
+                }
                 if attempt == 1 or attempt % 5 == 0:
                     logger.warning(
                         "Deferring watch notification for %s chat=%s after %s; retry in %.0fs (attempt %d)",
                         evt.get("platform"), evt.get("chat_id"),
-                        evt.get("_watch_notification_retry_reason", "transient refusal"), delay, attempt,
+                        retry_states[route_key]["reason"], delay, attempt,
                     )
                 completion_queue.put(evt)
+            else:
+                retry_states.pop(route_key, None)
 
     def _adapter_by_platform_value(self, platform_name: str):
         """Literal ``p.value == platform_name`` scan over connected adapters (native adapters only)."""

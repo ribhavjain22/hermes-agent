@@ -926,6 +926,51 @@ async def test_post_turn_watch_drain_defers_busy_route_with_backoff(monkeypatch,
 
 
 @pytest.mark.asyncio
+async def test_post_turn_watch_drain_backoffs_fresh_events_for_busy_route(monkeypatch, tmp_path):
+    from gateway.wake import WakeNotAccepted
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    completion_queue = queue.Queue()
+    first = _watch_event()
+    second = {**first, "session_id": "proc_watch_2"}
+    completion_queue.put(first)
+    completion_queue.put(second)
+    attempts = 0
+
+    async def refuse_busy_route(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise WakeNotAccepted("admission_conflict")
+
+    runner._inject_watch_notification = refuse_busy_route
+
+    await runner._drain_watch_notifications(completion_queue)
+
+    assert attempts == 1
+    assert completion_queue.qsize() == 2
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_refusal_does_not_log_expected_busy_admission(monkeypatch, tmp_path, caplog):
+    from gateway import session_automation
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    prepared = {
+        "type": "heartbeat", "session_id": "proc_watch",
+        "session_key": "agent:main:telegram:dm:123:42",
+        "platform": "telegram", "chat_id": "123",
+    }
+    monkeypatch.setattr(session_automation, "prepare_heartbeat", AsyncMock(return_value=prepared))
+    runner._inject_watch_notification = AsyncMock(return_value=False)
+
+    with caplog.at_level("WARNING"):
+        assert await session_automation.deliver_heartbeat(runner, prepared) is False
+
+    assert runner._inject_watch_notification.await_args.kwargs["log_refusal"] is False
+    assert not any("Watch notification not admitted" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_durable_claim_settlement_does_not_block_event_loop(monkeypatch, tmp_path):
     import threading
     from types import SimpleNamespace

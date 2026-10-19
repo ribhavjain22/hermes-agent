@@ -58,7 +58,7 @@ async def deliver_heartbeat(runner, event):
             if not text:
                 return None
             try:
-                delivered = await runner._inject_watch_notification(text, prepared)
+                delivered = await runner._inject_watch_notification(text, prepared, log_refusal=False)
             except Exception:
                 logger.exception("Watch notification injection error")
                 return False
