@@ -1,5 +1,7 @@
 """Smoke tests for gateway /busy command dispatch."""
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 import gateway.run as gateway_run
@@ -45,6 +47,19 @@ class TestBusyCommand:
         assert busy_mode in reply_text
         assert "busy" in reply_text
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["status?", "status", "What is the status?"])
+async def test_plain_status_query_during_busy_uses_status_handler(text):
+    runner = _make_runner()
+    event = _make_event(text)
+    runner._handle_status_command = AsyncMock(return_value="current run status")
+
+    handled, result = await runner._hm_busy_slash_or_photo(event, event.source, "busy-session")
+
+    assert handled is True
+    assert result == "current run status"
+    runner._handle_status_command.assert_awaited_once_with(event)
 
 class TestBusyCommandPersistence:
     """Test /busy persistence with mocked save_config_value."""

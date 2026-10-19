@@ -581,6 +581,16 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayPluginInjectionMixin)
         command's mid-run behavior is declared on its CommandDef (busy_policy / busy_handler)."""
         from hermes_cli.commands import resolve_command as _resolve_cmd_inner
         _evt_cmd = event.get_command()
+        _plain_status_query = " ".join((event.text or "").casefold().strip().rstrip("?.!").split())
+        if (
+            not _evt_cmd and event.message_type == MessageType.TEXT
+            and not event.media_urls and not event.media_types
+            and _plain_status_query in {
+                "status", "what is the status", "status update", "progress", "progress update",
+            }
+        ):
+            # Short status questions are control queries, not mid-run corrections or new work.
+            return True, await self._handle_status_command(event)
         _cmd_def_inner = _resolve_cmd_inner(_evt_cmd) if _evt_cmd else None
 
         if _cmd_def_inner:
