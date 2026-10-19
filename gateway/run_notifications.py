@@ -66,6 +66,7 @@ _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
 _SELF_CLEARING_STORAGE_CAUSES = frozenset({"compression", "compression_closed", "turn_lease"})
 # Process-watcher retries of a refused completion: ~5 min at the default 5 s check interval.
 _MAX_COMPLETION_INJECTION_ATTEMPTS = 8
+_WATCH_NOTIFICATION_RETRY_MAX_DELAY = 60
 _COMPLETION_INJECTION_RETRY_MAX_DELAY = 60
 
 # Durable async-delegation claim transitions: kind -> (tools.async_delegation function, failure log).
@@ -710,6 +711,9 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         from gateway.run import _drain_gateway_watch_events, _format_gateway_process_notification
         watch_events = _drain_gateway_watch_events(completion_queue)
         for evt in watch_events:
+            if evt.get("_watch_notification_retry_after", 0) > time.monotonic():
+                completion_queue.put(evt)
+                continue
             async with self._completion_event_scope(evt):
                 from tools.process_registry_notifications import should_surface_notification
                 if not should_surface_notification(evt):
@@ -723,13 +727,44 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                     synth_text = _format_gateway_process_notification(evt)
                     if not synth_text:
                         continue
+                    from gateway.wake import WakeNotAccepted
                     try:
-                        delivered = await self._inject_watch_notification(synth_text, evt)
-                    except Exception:
-                        logger.exception("Watch notification injection error")
+                        delivered = await self._inject_watch_notification(
+                            synth_text, evt, raise_not_accepted=True, log_refusal=False,
+                        )
+                    except WakeNotAccepted as exc:
+                        # Busy sessions recover; retain their event and retry with backoff.
+                        if str(exc) in {
+                            "not_found", "permission_denied", "invalid_params",
+                            "stale_generation", "runtime_retired",
+                        }:
+                            logger.info(
+                                "Dropping stale watch notification for %s chat=%s: %s",
+                                evt.get("platform"), evt.get("chat_id"), exc,
+                            )
+                            delivered = None
+                        else:
+                            evt["_watch_notification_retry_reason"] = str(exc)
+                            delivered = False
+                    except Exception as exc:
+                        evt["_watch_notification_retry_reason"] = str(exc)
+                        logger.debug("Watch notification injection error; deferring: %s", exc)
                         delivered = False
-            # The original event: a requeued tick folds again from what is still queued.
+            # Retry refusals without polling the busy session on every drain tick.
             if delivered is False:
+                attempt = int(evt.get("_watch_notification_attempts", 0)) + 1
+                delay = jittered_backoff(
+                    attempt, base_delay=5, max_delay=_WATCH_NOTIFICATION_RETRY_MAX_DELAY,
+                    jitter_ratio=0.0,
+                )
+                evt["_watch_notification_attempts"] = attempt
+                evt["_watch_notification_retry_after"] = time.monotonic() + delay
+                if attempt == 1 or attempt % 5 == 0:
+                    logger.warning(
+                        "Deferring watch notification for %s chat=%s after %s; retry in %.0fs (attempt %d)",
+                        evt.get("platform"), evt.get("chat_id"),
+                        evt.get("_watch_notification_retry_reason", "transient refusal"), delay, attempt,
+                    )
                 completion_queue.put(evt)
 
     def _adapter_by_platform_value(self, platform_name: str):
@@ -824,7 +859,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         return next((a for p, a in adapters.items() if p.value == platform_name), None)
 
     async def _inject_watch_notification(
-        self, synth_text: str, evt: dict, *, raise_not_accepted: bool = False,
+        self, synth_text: str, evt: dict, *, raise_not_accepted: bool = False, log_refusal: bool = True,
     ) -> Optional[bool]:
         """Inject a watch/completion notification as a synthetic message event.
 
@@ -907,8 +942,9 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 await admit_internal_event(adapter, synth_event)
             return True
         except WakeNotAccepted as exc:
-            logger.warning("Watch notification not admitted for %s chat=%s: %s",
-                           platform_name, source.chat_id, exc)
+            log = logger.warning if log_refusal else logger.debug
+            log("Watch notification not admitted for %s chat=%s: %s",
+                platform_name, source.chat_id, exc)
             # Durable callers refund the claim; ordinary watch callers just requeue.
             if raise_not_accepted:
                 raise

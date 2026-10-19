@@ -879,3 +879,47 @@ async def test_raw_output_modes_are_human_facing(monkeypatch, tmp_path):
         assert "proc_deadbeef" not in text and "[Background process" not in text and "~" not in text
         assert "\x1b[" not in text
         assert "make -j8 all" in text
+
+
+@pytest.mark.asyncio
+async def test_post_turn_watch_drain_drops_permanently_refused_route(monkeypatch, tmp_path):
+    from gateway.wake import WakeNotAccepted
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    completion_queue = queue.Queue()
+    event = _watch_event()
+    completion_queue.put(event)
+
+    async def refuse_stale_route(*_args, **_kwargs):
+        raise WakeNotAccepted("not_found")
+
+    runner._inject_watch_notification = refuse_stale_route
+
+    await runner._drain_watch_notifications(completion_queue)
+
+    assert completion_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_post_turn_watch_drain_defers_busy_route_with_backoff(monkeypatch, tmp_path):
+    from gateway.wake import WakeNotAccepted
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    completion_queue = queue.Queue()
+    event = _watch_event()
+    completion_queue.put(event)
+    attempts = 0
+
+    async def refuse_busy_route(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise WakeNotAccepted("admission_conflict")
+
+    runner._inject_watch_notification = refuse_busy_route
+
+    await runner._drain_watch_notifications(completion_queue)
+    assert completion_queue.qsize() == 1
+    await runner._drain_watch_notifications(completion_queue)
+
+    assert attempts == 1
+    assert completion_queue.qsize() == 1
