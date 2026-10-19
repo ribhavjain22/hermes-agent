@@ -1238,6 +1238,15 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         if not should_surface_notification(evt):
             return None  # Suppressed noise is terminal, not a consumed process result.
         identity = self._completion_delivery_identity(evt)
+        retry_route = tuple(str(evt.get(name) or "") for name in (
+            "profile", "platform", "chat_type", "chat_id", "thread_id",
+        )) + (str(evt.get("session_key") or evt.get("parent_session_id") or ""),)
+        retry_states = getattr(self, "_completion_notification_retry_state", None)
+        if retry_states is None:
+            retry_states = self._completion_notification_retry_state = {}
+        retry_state = retry_states.get(retry_route)
+        if retry_state and retry_state["retry_after"] > time.monotonic():
+            return False
         claim = self._CompletionClaim()
         accepted = identity_claimed = refused = False
         try:
@@ -1261,16 +1270,34 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             completion_ids = [claim.delegation_id] if claim.claim_id else []
             completion_ids += [sibling["delegation_id"] for sibling, claim_id in sibling_claims if claim_id]
             evt = {**evt, "completion_ids": completion_ids}
-            injection_result = await self._inject_watch_notification(synth_text, evt, raise_not_accepted=True)
+            injection_result = await self._inject_watch_notification(
+                synth_text, evt, raise_not_accepted=True, log_refusal=False,
+            )
             if injection_result is not True:
                 return injection_result
             accepted = True
             if identity is not None:
                 with self._completion_delivery_lock:
                     self._mark_completions_delivered_locked((identity,))
+            retry_states.pop(retry_route, None)
             return True
-        except WakeNotAccepted:
+        except WakeNotAccepted as exc:
             refused = True
+            if str(exc) == "admission_conflict":
+                attempt = int(retry_state["attempts"]) + 1 if retry_state else 1
+                delay = jittered_backoff(
+                    attempt, base_delay=5, max_delay=_WATCH_NOTIFICATION_RETRY_MAX_DELAY,
+                    jitter_ratio=0.0,
+                )
+                retry_states[retry_route] = {
+                    "attempts": attempt, "retry_after": time.monotonic() + delay,
+                }
+                if attempt == 1 or attempt % 5 == 0:
+                    logger.warning(
+                        "Deferring completion notification for %s chat=%s after admission_conflict; "
+                        "retry in %.0fs (attempt %d)",
+                        evt.get("platform"), evt.get("chat_id"), delay, attempt,
+                    )
             return False
         finally:
             if identity_claimed and not accepted:

@@ -2,6 +2,10 @@
 import asyncio
 import logging
 import time
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -32,7 +36,7 @@ async def drain(adapter):
 
 
 @pytest.mark.asyncio
-async def test_completion_ack_requires_admission_and_replay_never_repeats(tmp_path):
+async def test_completion_ack_requires_admission_and_replay_never_repeats(tmp_path, caplog):
     runner = GatewayRunner(GatewayConfig())
     adapter = DiscordAdapter(PlatformConfig(enabled=True, typing_indicator=False))
     runner.adapters = {Platform.DISCORD: adapter}
@@ -65,8 +69,11 @@ async def test_completion_ack_requires_admission_and_replay_never_repeats(tmp_pa
         await adapter.handle_message(MessageEvent(text="human-pending", source=source))
         adapter.set_busy_session_handler(runner._handle_active_session_busy_message)
         runner._BUSY_QUEUE_MAX_PENDING = 1
+        caplog.set_level(logging.WARNING, logger="gateway.run")
         for _ in range(10):
             assert await runner._deliver_async_delegation_group(events) is False
+        refusals = [record for record in caplog.records if "admission_conflict" in record.message]
+        assert len(refusals) <= 1
         assert adapter._pending_messages[key].text == "human-pending"
         assert not runner._completion_deliveries_delivered
         for event in events:
@@ -93,6 +100,43 @@ async def test_completion_ack_requires_admission_and_replay_never_repeats(tmp_pa
         release.set()
         await drain(adapter)
         await runner._cancel_process_completion_batch_tasks()
+
+
+@pytest.mark.asyncio
+async def test_busy_completion_refusal_is_suppressed_and_backed_off(tmp_path, caplog):
+    from gateway.wake import WakeNotAccepted
+
+    runner = GatewayRunner(GatewayConfig())
+    claim = SimpleNamespace(
+        proceed=True, early_result=None, defer=False, claim_id=None,
+        delegation_id=None, owner_session_id="", proven_session_id="",
+    )
+    runner._preflight_completion_delivery = AsyncMock(return_value=claim)
+    runner._completion_delivery_identity = lambda _evt: None
+
+    @asynccontextmanager
+    async def scope(_evt):
+        yield
+
+    runner._completion_event_scope = scope
+    attempts = 0
+
+    async def refuse_busy(*_args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        assert kwargs["log_refusal"] is False
+        raise WakeNotAccepted("admission_conflict")
+
+    runner._inject_watch_notification = refuse_busy
+    event = {"type": "completion", "session_key": "agent:main:discord:dm:42",
+             "platform": "discord", "chat_id": "42"}
+    caplog.set_level(logging.WARNING, logger="gateway.run")
+
+    assert await runner._deliver_completion_notification("done", event) is False
+    assert await runner._deliver_completion_notification("done", event) is False
+
+    assert attempts == 1
+    assert not any("Watch notification not admitted" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio
