@@ -61,3 +61,32 @@ async def test_worker_fails_at_once_when_the_owner_is_not_transiently_down(monke
 
 async def _no_sleep(_seconds):
     return None
+
+
+@pytest.mark.asyncio
+async def test_worker_retries_a_transient_gateway_connection_failure_before_submitting(monkeypatch, tmp_path):
+    submitted = []
+    attempts = 0
+
+    @asynccontextmanager
+    async def connect():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise gateway_client.GatewayClientError(
+                "Gateway connection failed; no local fallback"
+            ) from ConnectionRefusedError(111, "connection refused")
+        async with _owner([], submitted)() as client:
+            yield client
+
+    monkeypatch.setattr(gateway_client, "connect_gateway", connect)
+    monkeypatch.setattr(kanban_worker_client.asyncio, "sleep", _no_sleep)
+    from gateway import session_kanban
+    monkeypatch.setattr(session_kanban, "worker_result", lambda *_: {"exit_code": 0, "last_output": "card closed"})
+    monkeypatch.delenv("HERMES_TUI_GATEWAY_URL", raising=False)
+
+    result = await kanban_worker_client.run({"task_id": "t1"}, str(tmp_path / "kanban.db"))
+
+    assert result == 0
+    assert attempts == 2
+    assert submitted == ["kanban.run"]

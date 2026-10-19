@@ -26,14 +26,32 @@ async def run(params, board_db):
     if os.environ.get('HERMES_TUI_GATEWAY_URL'):
         raise GatewayClientError('Kanban requires the assigned local profile owner')
     deadline = time.monotonic() + OWNER_WAIT_S
+    delay = 1.0
     while True:
+        connection = connect_gateway()
         try:
-            async with connect_gateway() as client:
-                return await _submit_claim(client, params, board_db)
+            client = await connection.__aenter__()
         except GatewayUnavailableError as exc:
             if exc.state not in _TRANSIENT_OWNER_STATES or time.monotonic() >= deadline:
                 raise
             await asyncio.sleep(1)
+            continue
+        except GatewayClientError as exc:
+            # A failed WebSocket dial happened before `kanban.run` was submitted, so reconnecting
+            # cannot duplicate the task. Do not retry RPC/session errors after owner admission.
+            if not isinstance(exc.__cause__, OSError) or time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(min(delay, max(deadline - time.monotonic(), 0)))
+            delay = min(delay * 2, 15.0)
+            continue
+        try:
+            result = await _submit_claim(client, params, board_db)
+        except BaseException as exc:
+            await connection.__aexit__(type(exc), exc, exc.__traceback__)
+            raise
+        else:
+            await connection.__aexit__(None, None, None)
+            return result
 
 
 async def _submit_claim(client, params, board_db):
