@@ -524,6 +524,7 @@ class _KanbanNotification:
         self.adapter: Any = None
         self.is_push_adapter = True
         self.wake_kinds: set = set()
+        self.wake_event_ids: tuple = ()
 
     # -- cursor / subscription ops (blocking, run in a fresh-context thread) --
 
@@ -601,6 +602,11 @@ class _KanbanNotification:
             synth += "\n" + t("gateway.kanban.wake.review_detail", reason=self.wake_review_detail)
         self.synth = synth + "\n\n" + t("gateway.kanban.wake.guidance")
 
+    def _wake_delivery_identity(self) -> str:
+        import json
+        return json.dumps([self.board_slug, self.task_id, list(self.wake_event_ids)],
+                          separators=(",", ":"))
+
     def _log_woke(self) -> None:
         logger.info("kanban notifier: woke agent for %s on %s/%s profile=%s events=%s",
                     self.task_id, self.platform_str, self.sub["chat_id"], self.sub_profile or "default", self.wake_kinds)
@@ -640,7 +646,8 @@ class _KanbanNotification:
             async with self._owner_scope():
                 await deliver_wake(self.adapter, text=self.synth, session_id=self.session_key,
                                    profile=self._served_wake_profile(),
-                                   notification_category="diagnostic" if self.wake_diagnostic else "result")
+                                   notification_category="diagnostic" if self.wake_diagnostic else "result",
+                                   automation_identity=self._wake_delivery_identity())
             self._log_woke()
             return
         from gateway.session import SessionSource
@@ -788,7 +795,8 @@ class _KanbanNotification:
                     self.format_event(ev)
                 self.build_wake_text()
                 if self.wake_kinds:
-                    wake_payloads.append((self.synth, self.wake_diagnostic, self.wake_kinds))
+                    event_ids = tuple(ev.id for ev in events if ev.kind in self.wake_kinds)
+                    wake_payloads.append((self.synth, self.wake_diagnostic, self.wake_kinds, event_ids))
             self.d = {**self.d, "events": original_events}
         is_push = self.is_push_adapter
         from gateway.wake import WakeNotAccepted
@@ -796,7 +804,7 @@ class _KanbanNotification:
         # A requested wake is required even when its passive ping already landed.
         if wake_payloads:
             try:
-                for self.synth, self.wake_diagnostic, self.wake_kinds in wake_payloads:
+                for self.synth, self.wake_diagnostic, self.wake_kinds, self.wake_event_ids in wake_payloads:
                     await self.wake()
                 self.clear_failures()
             except WakeNotAccepted:

@@ -645,7 +645,10 @@ async def admit_route_wake(runner, adapter, source, text, producer, metadata=Non
     if authority is None or entry is None:
         return False
     import uuid
-    identity = json.dumps([producer, key, uuid.uuid4().hex], separators=(',', ':'))
+    delivery_ids = sorted({item for item in (metadata or {}).get('automation_identities', ())
+                           if isinstance(item, str) and item})
+    identity = json.dumps([producer, key, delivery_ids[0] if delivery_ids else uuid.uuid4().hex],
+                          separators=(',', ':'))
     if source.platform == Platform.LOCAL:
         # A local route has no messaging provenance to borrow: its wake rides local_automation_v1 on
         # the live session's own source object (``snapshot_local_automation`` checks identity).

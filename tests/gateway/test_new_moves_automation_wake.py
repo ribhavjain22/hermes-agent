@@ -15,7 +15,7 @@ async def test_new_moves_a_queued_wake_to_the_fresh_session(monkeypatch):
     from gateway.platforms.event import MessageEvent
     from gateway.run import GatewayRunner
     from gateway.session_authority import initialize_session_authority
-    from gateway.session_automation import admit_route_wake
+    from gateway.wake import deliver_wake
     from gateway.session_results import execution_result
     from hermes_state_runtime import list_session_admissions
     from plugins.platforms.discord.adapter import DiscordAdapter
@@ -55,7 +55,9 @@ async def test_new_moves_a_queued_wake_to_the_fresh_session(monkeypatch):
     await adapter.handle_message(MessageEvent(text='A', source=source, message_id='A'))
     await asyncio.wait_for(running.wait(), 10)
     old = runner.session_store.peek_session_id(key)
-    assert await admit_route_wake(runner, adapter, source, 'WAKE', 'kanban-wake')
+    delivery_identity = "kanban:board/task/event:42"
+    await deliver_wake(adapter, source=source, text="WAKE", automation_identity=delivery_identity)
+    await deliver_wake(adapter, source=source, text="WAKE", automation_identity=delivery_identity)
     await adapter.handle_message(MessageEvent(text='/new', source=source, message_id='new'))
     new = runner.session_store.peek_session_id(key)
     assert new != old

@@ -89,7 +89,8 @@ async def admit_internal_event(adapter: Any, event: Any) -> None:
 
 
 async def deliver_wake(adapter: Any, *, text: str, session_id: str = "", source: Any = None,
-                       notification_category: str = "result", profile: Optional[str] = None) -> None:
+                       notification_category: str = "result", profile: Optional[str] = None,
+                       automation_identity: Optional[str] = None) -> None:
     """Deliver a wake turn to the session behind ``adapter``. ``session_id`` is the RAW session id
     (``X-Hermes-Session-Id`` / state.db key) — required for non-push adapters. ``source`` is the
     ``SessionSource`` for the synthetic event — required for push-capable adapters. ``profile``
@@ -105,6 +106,8 @@ async def deliver_wake(adapter: Any, *, text: str, session_id: str = "", source:
             from gateway.session_automation import admit_route_wake
             from hermes_state_runtime import RuntimeStoreError
             category = {"notification_category": notification_category} if notification_category != "result" else {}
+            if automation_identity:
+                category["automation_identities"] = [automation_identity]
             try:
                 if await admit_route_wake(runner, adapter, source, text, "kanban-wake", category):
                     return  # committed to the session FIFO: never interrupts the admitted turn
