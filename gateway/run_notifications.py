@@ -1584,7 +1584,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         from tools.async_delegation import sweep_orphaned_completions
         from tools.process_registry import process_registry as _pr
         sweep = lambda: sweep_orphaned_completions(_pr.completion_queue)
-        with _log_suppressed(logging.DEBUG, "Orphaned async completion sweep failed: %s"):
+        with _log_suppressed(logging.WARNING, "Orphaned async completion sweep failed: %s"):
             if count := sweep():
                 logger.info("Re-offered %d orphaned async completion(s)", count)
         self._each_secondary_ledger((getattr(self, "_served_profile_homes", None) or {}).items(), sweep,
@@ -1617,7 +1617,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         from tools.process_registry import process_registry as _pr
         last_orphan_sweep = None
         while self._running:
-            with _log_suppressed(logging.DEBUG, "Async delegation watcher error: %s"):
+            with _log_suppressed(logging.WARNING, "Async delegation watcher error: %s"):
                 # Completions whose owner process died while this gateway runs (#97202).
                 if last_orphan_sweep is None or time.monotonic() - last_orphan_sweep >= ORPHAN_SWEEP_INTERVAL_S:
                     last_orphan_sweep = time.monotonic()

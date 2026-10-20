@@ -315,3 +315,40 @@ def test_throttle_runs_at_most_one_sweep_per_home_per_interval(tmp_path, monkeyp
             ad.maybe_sweep_orphaned_completions(q, now=101.0)
         ad.maybe_sweep_orphaned_completions(q, now=100.0 + ad.ORPHAN_SWEEP_INTERVAL_S + 1)
     assert calls == [str(tmp_path / "a"), str(tmp_path / "b"), str(tmp_path / "a")]
+
+
+def test_sweep_failure_logs_at_warning_not_swallowed_silently(monkeypatch, caplog):
+    """A failing primary-ledger sweep must be visible at WARNING: this exact silence (the
+    exception previously vanished below the default log level) let two real stuck delegations
+    go unresolved for over an hour with zero trace in any log, until a human ran the function
+    by hand outside the gateway (see the live incident this regression guards against)."""
+    import logging
+    from gateway.run import GatewayRunner
+
+    def _boom():
+        raise RuntimeError("simulated sweep failure")
+
+    monkeypatch.setattr("tools.async_delegation.sweep_orphaned_completions", lambda q: _boom())
+    runner = object.__new__(GatewayRunner)
+    runner._primary_profile_name = "default"
+    runner._served_profile_homes = {}
+    with caplog.at_level(logging.WARNING, logger="gateway.run"):
+        runner._sweep_orphaned_completion_ledgers()
+    assert any(
+        "Orphaned async completion sweep failed" in r.message and "simulated sweep failure" in r.message
+        for r in caplog.records
+    ), [r.message for r in caplog.records]
+
+
+def test_watcher_loop_body_wraps_errors_at_warning_not_debug():
+    """Regression guard: the async-delegation watcher per-tick suppressor must log an escaping
+    exception at WARNING. It previously used DEBUG, so any failure in that tick (the orphan sweep,
+    the watch-notification drain, or delivery) vanished below the default log level with zero
+    operator-visible trace -- exactly how two real stuck delegations went unresolved for over an
+    hour until a human ran the sweep by hand outside the gateway."""
+    import inspect
+    from gateway.run_notifications import GatewayNotificationsMixin
+
+    source = inspect.getsource(GatewayNotificationsMixin._async_delegation_watcher)
+    assert 'logging.WARNING, "Async delegation watcher error' in source, source
+    assert 'logging.DEBUG, "Async delegation watcher error' not in source, source
