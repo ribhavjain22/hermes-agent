@@ -18,6 +18,47 @@ from plugins.platforms.discord.adapter import DiscordAdapter
 from tools import async_delegation as delegation
 
 
+
+def test_route_identity_ignores_mutable_display_and_actor_metadata():
+    from dataclasses import replace
+
+    from gateway.session_automation import _route_identity
+
+    first = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="thread-1",
+        chat_type="thread",
+        thread_id="thread-1",
+        user_id="user-1",
+        user_name="First name",
+        chat_name="Original thread name",
+        chat_topic="Original topic",
+        scope_id="guild-1",
+        profile="main",
+        auto_thread_created=True,
+        auto_thread_initial_name="Initial name",
+    )
+    later = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="thread-1",
+        chat_type="thread",
+        thread_id="thread-1",
+        user_id="user-2",
+        user_name="Second name",
+        chat_name="Renamed thread",
+        chat_topic="Updated topic",
+        scope_id="guild-1",
+        profile="main",
+        auto_thread_created=False,
+    )
+
+    assert _route_identity(first) == _route_identity(later)
+    assert _route_identity(first) != _route_identity(replace(later, scope_id="guild-2"))
+    assert _route_identity(first) != _route_identity(replace(later, thread_id="thread-2"))
+    assert _route_identity(first) != _route_identity(replace(later, chat_id="thread-2"))
+    assert _route_identity(first) != _route_identity(replace(later, profile="other"))
+
+
 def pending(key, name):
     evt = {"type": "async_delegation", "session_key": key, "delegation_id": name,
            "summary": name, "status": "completed", "dispatched_at": time.time()}

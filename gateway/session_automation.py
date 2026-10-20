@@ -324,8 +324,20 @@ def admission_display(payload):
     return card
 
 
+_ROUTE_IDENTITY_FIELDS = frozenset({
+    "platform", "chat_id", "chat_type", "thread_id", "scope_id", "guild_id",
+    "parent_chat_id", "chat_id_alt", "profile", "prospective_thread_id",
+})
+
+
 def _route_identity(source):
-    return {key: value for key, value in source.to_dict().items() if key != 'message_id'}
+    """Compare destination identity, not message/actor metadata that changes within a route.
+
+    Session-store origins are snapshots of the first message; the committed native envelope can
+    reflect a later rename, topic update, or different group author. Those fields must not make a
+    valid background completion look like a cross-route admission.
+    """
+    return {key: value for key, value in source.to_dict().items() if key in _ROUTE_IDENTITY_FIELDS}
 
 
 def committed_route_envelope(authority, entry):
