@@ -385,7 +385,7 @@ _SPECS = [
              help="Comma-separated event kinds to include (e.g. 'completed,blocked,gave_up,crashed,timed_out')"),
         _arg("--interval", type=float, default=0.5, help="Poll interval in seconds (default: 0.5)"),
     ], help="Live-stream task_events to the terminal (Ctrl+C to exit)"),
-    _cmd("stats", [_json_flag()], help="Per-status + per-assignee counts + oldest-ready age"),
+    _cmd("stats", [_arg("--all", action="store_true", dest="all_boards", help="Summarize nonterminal work across every board"), _json_flag()], help="Per-status + per-assignee counts; --all includes every board"),
     _cmd("notify-subscribe", [
         _TASK_ID,
         *_NOTIFY_TARGET,

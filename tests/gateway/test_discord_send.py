@@ -256,6 +256,36 @@ async def test_typing_restartable_after_error():
         "Should restart typing after previous failure"
 
 
+@pytest.mark.parametrize(("retry_after", "expected_delay"), [(1.0, 12.0), (20.0, 20.0)])
+@pytest.mark.asyncio
+async def test_typing_rate_limit_waits_at_least_normal_refresh_interval(
+    monkeypatch, retry_after, expected_delay
+):
+    import plugins.platforms.discord.adapter as discord_adapter
+
+    class RateLimited(Exception):
+        def __init__(self):
+            self.retry_after = retry_after
+
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+    adapter._client = MagicMock()
+    adapter._client.http = MagicMock()
+    adapter._client.http.request = AsyncMock(side_effect=RateLimited())
+    adapter._typing_tasks = {}
+    sleeps = []
+
+    async def record_sleep(delay):
+        sleeps.append(delay)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(discord_adapter.asyncio, "sleep", record_sleep)
+    await adapter.send_typing("12345")
+    await adapter._typing_tasks["12345"]
+
+    assert sleeps == [expected_delay]
+    adapter._client.http.request.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # #66797 — outbound MEDIA video must reach channel.send as a real attachment
 # ---------------------------------------------------------------------------

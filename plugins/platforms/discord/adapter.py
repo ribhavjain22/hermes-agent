@@ -89,6 +89,7 @@ _DISCORD_NONCONVERSATIONAL_STATE_FILENAME = "discord_nonconversational_messages.
 
 _DISCORD_COMMAND_SYNC_MUTATION_INTERVAL_SECONDS = 4.5
 _DISCORD_COMMAND_SYNC_MAX_RATE_LIMIT_SLEEP_SECONDS = 30.0
+_DISCORD_TYPING_REFRESH_SECONDS = 12.0
 # Discord caps global slash commands at 100/app; exceeding it fails the ENTIRE sync (error 30032).
 _DISCORD_MAX_APP_COMMANDS = 100
 # Native slash commands (registered before COMMAND_REGISTRY/plugins so they survive the 100 cap):
@@ -4330,7 +4331,7 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """Start a persistent typing loop (POST typing every 12s; indicator lasts ~10s).
-        TYPING_START is unreliable for bots in DMs; 429 sleeps ``retry_after``; CancelledError ends it."""
+        TYPING_START is unreliable for bots in DMs; on 429 wait at least one refresh interval and honor a longer Retry-After. Cancellation ends it."""
         if not self._client:
             return
         if chat_id in self._typing_tasks:
@@ -4349,16 +4350,17 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
                     except Exception as e:
                         retry_after = self._extract_discord_retry_after(e)
                         if retry_after is not None:
+                            delay = max(_DISCORD_TYPING_REFRESH_SECONDS, retry_after)
                             logger.warning(
                                 "Typing indicator rate-limited for %s; retrying in %.1fs",
-                                chat_id, retry_after,
+                                chat_id, delay,
                             )
                         else:
                             logger.debug("Discord typing indicator failed for %s: %s", chat_id, e)
                             return
-                        await asyncio.sleep(retry_after)
+                        await asyncio.sleep(delay)
                         continue
-                    await asyncio.sleep(12)
+                    await asyncio.sleep(_DISCORD_TYPING_REFRESH_SECONDS)
             except asyncio.CancelledError:
                 pass
             finally:

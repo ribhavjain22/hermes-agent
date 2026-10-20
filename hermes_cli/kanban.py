@@ -1134,7 +1134,86 @@ def _cmd_archive(args: argparse.Namespace) -> int:
                            lambda tid: f"Archived {tid}", lambda tid: f"cannot archive {tid}")
 
 
+def _cmd_stats_all(args: argparse.Namespace) -> int:
+    """Read a compact work-in-progress snapshot from every non-archived board."""
+    workflow_statuses = list(kanban_workflow.DEFAULT_WORKFLOW.keys())
+    active_statuses = set(workflow_statuses) - {"done", "archived"}
+    status_order = {status: index for index, status in enumerate(workflow_statuses)}
+    now = int(time.time())
+    totals = {status: 0 for status in workflow_statuses}
+    board_rows = []
+    errors = 0
+    for board in kb.list_boards(include_archived=False):
+        slug = board["slug"]
+        try:
+            with kbc.connect_closing(board=slug) as conn:
+                stats = kb.board_stats(conn)
+                tasks = []
+                for status in sorted(active_statuses):
+                    tasks.extend(kb.list_tasks(conn, status=status, limit=50, order_by="updated"))
+        except Exception as exc:
+            errors += 1
+            board_rows.append({"slug": slug, "name": board.get("name") or slug,
+                               "error": type(exc).__name__})
+            continue
+
+        counts = stats["by_status"]
+        for status, count in counts.items():
+            if status in totals:
+                totals[status] += count
+        tasks.sort(key=lambda task: (status_order.get(task.status, 999), -task.priority,
+                                     task.created_at or 0, task.id))
+        active_count = sum(counts.get(status, 0) for status in active_statuses)
+        shown = tasks[:50]
+        board_rows.append({
+            "slug": slug,
+            "name": board.get("name") or slug,
+            "counts": counts,
+            "oldest_ready_age_seconds": stats["oldest_ready_age_seconds"],
+            "active_task_count": active_count,
+            "tasks_omitted": max(0, active_count - len(shown)),
+            "tasks": [{
+                "id": task.id,
+                "title": task.title,
+                "status": task.status,
+                "assignee": task.assignee,
+                "priority": task.priority,
+                "last_heartbeat_at": task.last_heartbeat_at,
+                "block_kind": task.block_kind,
+            } for task in shown],
+        })
+
+    totals["board_count"] = len(board_rows)
+    totals["active_task_count"] = sum(row.get("active_task_count", 0) for row in board_rows)
+    payload = {"totals": totals, "boards": board_rows}
+    if _json_out(args, payload):
+        return 1 if errors else 0
+
+    print(f"All boards: {totals['board_count']}  |  Nonterminal tasks: {totals['active_task_count']}")
+    for board in board_rows:
+        if board.get("error"):
+            print(f"\n{board['name']} ({board['slug']}): ERROR — {board['error']}")
+            continue
+        counts = {status: board["counts"].get(status, 0) for status in kanban_workflow.DEFAULT_WORKFLOW.keys()
+                  if status not in {"done", "archived"} and board["counts"].get(status, 0)}
+        print(f"\n{board['name']} ({board['slug']}): {_fmt_counts(counts, '(no open tasks)')}")
+        for task in board["tasks"]:
+            assignee = f"@{task['assignee']}" if task["assignee"] else "unassigned"
+            suffix = []
+            if task["block_kind"]:
+                suffix.append(f"block={task['block_kind']}")
+            if task["last_heartbeat_at"]:
+                suffix.append(f"heartbeat={max(0, now - task['last_heartbeat_at'])}s ago")
+            detail = f" ({'; '.join(suffix)})" if suffix else ""
+            print(f"  {task['id']} [{task['status']}] {assignee} — {task['title']}{detail}")
+        if board["tasks_omitted"]:
+            print(f"  … {board['tasks_omitted']} more nonterminal tasks")
+    return 1 if errors else 0
+
+
 def _cmd_stats(args: argparse.Namespace) -> int:
+    if getattr(args, "all_boards", False):
+        return _cmd_stats_all(args)
     with kbc.connect_closing() as conn:
         stats = kb.board_stats(conn)
     if _json_out(args, stats):
@@ -1348,7 +1427,7 @@ _SLASH_KANBAN_HELP = """\
 Common subcommands:
   `list` (alias `ls`)   List tasks on the current board
   `show <id>`           Task details + comments + events
-  `stats`               Per-status / per-assignee counts
+  `stats`               Per-status / per-assignee counts (`stats --all` spans every board)
   `create <title>…`     Create a task (auto-subscribes you to events)
   `comment <id> <msg>`  Append a comment
   `attach <id> <path>`  Attach a local file; `attachments <id>` to list

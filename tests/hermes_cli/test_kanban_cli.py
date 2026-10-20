@@ -72,6 +72,32 @@ def test_run_slash_stats_text_includes_review_lane(kanban_home):
     assert json.loads(kc.run_slash("stats --json"))["by_status"].get("review") == 1
 
 
+def test_stats_all_boards_lists_nonterminal_tasks_without_switching_boards(kanban_home):
+    alpha = kb.create_board("alpha", name="Alpha Board")
+    assert alpha["slug"] == "alpha"
+    with kbc.connect_closing() as conn:
+        ready_id = kb.create_task(conn, title="default ready task", assignee="alice")
+    with kbc.connect_closing(board="alpha") as conn:
+        blocked_id = kb.create_task(
+            conn, title="alpha blocked task", assignee="bob", initial_status="blocked"
+        )
+
+    payload = json.loads(kc.run_slash("stats --all --json"))
+    boards = {board["slug"]: board for board in payload["boards"]}
+
+    assert payload["totals"]["ready"] == 1
+    assert payload["totals"]["blocked"] == 1
+    assert boards["default"]["tasks"][0]["id"] == ready_id
+    assert boards["alpha"]["tasks"][0]["id"] == blocked_id
+    assert boards["alpha"]["tasks"][0]["status"] == "blocked"
+    normal_stats = kc.run_slash("stats")
+    assert "Alpha Board" not in normal_stats
+    overview = kc.run_slash("stats --all")
+    assert "Alpha Board (alpha)" in overview
+    assert ready_id in overview
+    assert blocked_id in overview
+
+
 def test_kanban_show_json_includes_runtime_limit(kanban_home):
     with kbc.connect() as conn:
         bounded_id = kb.create_task(
